@@ -210,12 +210,13 @@ class GeminiProvider(LLMProvider):
 # OpenAI-compatible (OpenAI, Groq, OpenRouter, vLLM, ...)
 # ------------------------------------------------------------------
 class OpenAICompatProvider(LLMProvider):
-    def __init__(self, model_name, display_name=None, api_key_env="OPENAI_API_KEY", base_url=None):
+    def __init__(self, model_name, display_name=None, api_key_env="OPENAI_API_KEY",
+                 base_url=None, prefix="openai"):
         api_key = os.getenv(api_key_env)
         if not api_key:
             raise ProviderError(f"{api_key_env} not set")
         self.model_name = model_name
-        self.id = f"openai:{model_name}"
+        self.id = f"{prefix}:{model_name}"
         self.display_name = display_name or model_name
         self.api_key = api_key
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
