@@ -1,5 +1,7 @@
 import json
 import time
+import queue
+import threading
 import concurrent.futures
 
 from django.http import StreamingHttpResponse
@@ -9,7 +11,7 @@ from rest_framework import status
 
 from .models import Question, ModelResponse, Judgment
 from .serializers import QuestionSerializer
-from .services.providers import build_contestants
+from .services.providers import build_contestants, ProviderError
 from .services.judge import judge_responses
 
 
@@ -22,6 +24,16 @@ def _run_one(provider, prompt):
             "display_name": provider.display_name,
             "response": text,
             "error": None,
+            "retry_after": None,
+            "latency_ms": int((time.time() - start) * 1000),
+        }
+    except ProviderError as e:
+        return {
+            "model_id": provider.id,
+            "display_name": provider.display_name,
+            "response": "",
+            "error": str(e),
+            "retry_after": getattr(e, "retry_after", None),
             "latency_ms": int((time.time() - start) * 1000),
         }
     except Exception as e:
@@ -30,6 +42,7 @@ def _run_one(provider, prompt):
             "display_name": provider.display_name,
             "response": "",
             "error": str(e),
+            "retry_after": None,
             "latency_ms": int((time.time() - start) * 1000),
         }
 
@@ -92,18 +105,24 @@ def _sse(event, data):
 def ask_stream(request):
     prompt = (request.GET.get("question") or "").strip()
 
-    def error_stream(message):
-        yield _sse("error", {"message": message})
-
     if not prompt:
-        return StreamingHttpResponse(error_stream("question is required"), content_type="text/event-stream")
+        resp = StreamingHttpResponse(
+            iter([_sse("error", {"message": "question is required"})]),
+            content_type="text/event-stream",
+        )
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
 
     contestants = build_contestants()
     if not contestants:
-        return StreamingHttpResponse(
-            error_stream("No LLM providers are configured. Check backend/.env (CONTESTANTS)."),
+        resp = StreamingHttpResponse(
+            iter([_sse("error", {"message": "No LLM providers are configured. Check backend/.env (CONTESTANTS)."})]),
             content_type="text/event-stream",
         )
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"
+        return resp
 
     def gen():
         question = Question.objects.create(text=prompt)
@@ -113,46 +132,96 @@ def ask_stream(request):
             "models": [{"model_id": c.id, "display_name": c.display_name} for c in contestants],
         })
 
-        results = []
-        for provider in contestants:
-            yield _sse("model_started", {"model_id": provider.id, "display_name": provider.display_name})
+        q = queue.Queue()
+        results_lock = threading.Lock()
+        results_by_id = {}
+
+        def run_provider(provider):
+            q.put(("model_started", {
+                "model_id": provider.id,
+                "display_name": provider.display_name,
+            }))
             full_text = ""
             error = None
+            retry_after = None
             start = time.time()
             try:
                 for chunk in provider.stream(prompt):
                     full_text += chunk
-                    yield _sse("model_chunk", {"model_id": provider.id, "chunk": chunk})
+                    q.put(("model_chunk", {"model_id": provider.id, "chunk": chunk}))
+            except ProviderError as e:
+                error = str(e)
+                retry_after = getattr(e, "retry_after", None)
             except Exception as e:
                 error = str(e)
 
             latency_ms = int((time.time() - start) * 1000)
-            mr = ModelResponse.objects.create(
-                question=question,
-                model_id=provider.id,
-                display_name=provider.display_name,
-                response=full_text,
-                error=error,
-                latency_ms=latency_ms,
-            )
-            results.append({
-                "model_id": provider.id,
-                "display_name": provider.display_name,
-                "response": full_text,
-                "error": error,
-            })
-            yield _sse("model_finished", {
-                "id": mr.id,
-                "model_id": provider.id,
-                "response": full_text,
-                "error": error,
-                "latency_ms": latency_ms,
-            })
+            with results_lock:
+                results_by_id[provider.id] = {
+                    "model_id": provider.id,
+                    "display_name": provider.display_name,
+                    "response": full_text,
+                    "error": error,
+                    "retry_after": retry_after,
+                    "latency_ms": latency_ms,
+                }
+            q.put(("__done__", provider.id))
+
+        threads = [
+            threading.Thread(target=run_provider, args=(c,), daemon=True)
+            for c in contestants
+        ]
+        for t in threads:
+            t.start()
+
+        finished = 0
+        total = len(contestants)
+
+        while finished < total:
+            try:
+                event, payload = q.get(timeout=300)
+            except queue.Empty:
+                break
+
+            if event == "__done__":
+                finished += 1
+                r = results_by_id.get(payload)
+                if r:
+                    mr = ModelResponse.objects.create(
+                        question=question,
+                        model_id=r["model_id"],
+                        display_name=r["display_name"],
+                        response=r["response"],
+                        error=r["error"],
+                        latency_ms=r["latency_ms"],
+                    )
+                    yield _sse("model_finished", {
+                        "id": mr.id,
+                        "model_id": r["model_id"],
+                        "response": r["response"],
+                        "error": r["error"],
+                        "retry_after": r.get("retry_after"),
+                        "latency_ms": r["latency_ms"],
+                    })
+            else:
+                yield _sse(event, payload)
 
         yield _sse("judge_started", {})
-        verdict = judge_responses(prompt, results)
+
+        results = list(results_by_id.values())
+        try:
+            verdict = judge_responses(prompt, results)
+        except Exception as e:
+            verdict = {
+                "evaluations": [],
+                "winner": None,
+                "reason": f"Judge failed: {e}",
+                "consensus": "",
+            }
+
         _save_judgment(question, results, verdict)
 
+        question.refresh_from_db()
         yield _sse("complete", {"result": QuestionSerializer(question).data})
 
     resp = StreamingHttpResponse(gen(), content_type="text/event-stream")

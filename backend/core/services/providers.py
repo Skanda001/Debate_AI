@@ -10,15 +10,102 @@ environment variables (see backend/.env.example).
 
 import os
 import json
+import re
+import time
 from abc import ABC, abstractmethod
+from datetime import datetime, timedelta, timezone
 
 import requests
 
 
+# ------------------------------------------------------------------
+# Errors
+# ------------------------------------------------------------------
 class ProviderError(Exception):
-    """Raised whenever a provider can't produce an answer."""
+    """Raised whenever a provider can't produce an answer.
+
+    `retry_after` (seconds, optional) tells the UI how long to wait
+    before the quota resets.
+    """
+
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
+# ------------------------------------------------------------------
+# Retry-after extraction helpers
+# ------------------------------------------------------------------
+def _extract_retry_after(resp):
+    """Try several headers providers use for rate-limit reset timing."""
+    if resp is None:
+        return None
+    headers = resp.headers or {}
+
+    ra = headers.get("Retry-After") or headers.get("retry-after")
+    if ra:
+        try:
+            return int(float(ra))
+        except (ValueError, TypeError):
+            pass
+
+    xr = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+    if xr:
+        try:
+            return max(0, int(float(xr)) - int(time.time()))
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+def _seconds_until_midnight_pacific():
+    """Gemini free-tier daily quotas reset at midnight Pacific Time."""
+    pacific = timezone(timedelta(hours=-8))
+    now_pt = datetime.now(pacific)
+    next_midnight = (now_pt + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int((next_midnight - now_pt).total_seconds())
+
+
+def _extract_retry_after_from_text(text):
+    """Parse Gemini's error strings for a reset hint."""
+    if not text:
+        return None
+    s = str(text)
+
+    # Daily quota — reset at midnight Pacific
+    if "PerDay" in s or "per day" in s.lower():
+        return _seconds_until_midnight_pacific()
+
+    # Per-minute / per-second retry hints
+    m = re.search(r"retry_delay\s*\{\s*seconds:\s*(\d+)", s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"Please retry in ([\d.]+)s", s)
+    if m:
+        return int(float(m.group(1)))
+    return None
+
+
+def _is_rate_limit_error(text):
+    """Best-effort detection of 429/quota errors in arbitrary strings."""
+    if not text:
+        return False
+    s = str(text).lower()
+    return (
+        "429" in s
+        or "rate limit" in s
+        or "quota" in s
+        or "resource_exhausted" in s
+        or "too many requests" in s
+    )
+
+
+# ------------------------------------------------------------------
+# Base class
+# ------------------------------------------------------------------
 class LLMProvider(ABC):
     id: str
     display_name: str
@@ -32,6 +119,9 @@ class LLMProvider(ABC):
         yield self.generate(prompt)
 
 
+# ------------------------------------------------------------------
+# Ollama
+# ------------------------------------------------------------------
 class OllamaProvider(LLMProvider):
     def __init__(self, model_name, display_name=None, base_url=None):
         self.model_name = model_name
@@ -73,6 +163,9 @@ class OllamaProvider(LLMProvider):
             raise ProviderError(str(e))
 
 
+# ------------------------------------------------------------------
+# Google Gemini
+# ------------------------------------------------------------------
 class GeminiProvider(LLMProvider):
     def __init__(self, model_name="gemini-2.5-flash", display_name=None):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -91,13 +184,32 @@ class GeminiProvider(LLMProvider):
             resp = model.generate_content(prompt)
             return (resp.text or "").strip()
         except Exception as e:
-            raise ProviderError(str(e))
+            msg = str(e)
+            retry_after = _extract_retry_after_from_text(msg)
+            if retry_after is None and _is_rate_limit_error(msg):
+                retry_after = 60
+            raise ProviderError(msg, retry_after=retry_after)
+
+    def stream(self, prompt):
+        try:
+            model = self._genai.GenerativeModel(self.model_name)
+            response = model.generate_content(prompt, stream=True)
+            for chunk in response:
+                text = getattr(chunk, "text", None)
+                if text:
+                    yield text
+        except Exception as e:
+            msg = str(e)
+            retry_after = _extract_retry_after_from_text(msg)
+            if retry_after is None and _is_rate_limit_error(msg):
+                retry_after = 60
+            raise ProviderError(msg, retry_after=retry_after)
 
 
+# ------------------------------------------------------------------
+# OpenAI-compatible (OpenAI, Groq, OpenRouter, vLLM, ...)
+# ------------------------------------------------------------------
 class OpenAICompatProvider(LLMProvider):
-    """Works with any OpenAI-compatible /chat/completions endpoint
-    (OpenAI itself, Groq, OpenRouter, local vLLM servers, etc.)."""
-
     def __init__(self, model_name, display_name=None, api_key_env="OPENAI_API_KEY", base_url=None):
         api_key = os.getenv(api_key_env)
         if not api_key:
@@ -116,16 +228,68 @@ class OpenAICompatProvider(LLMProvider):
                 json={"model": self.model_name, "messages": [{"role": "user", "content": prompt}]},
                 timeout=120,
             )
+            if resp.status_code == 429:
+                raise ProviderError("429 rate limited", retry_after=_extract_retry_after(resp))
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"].strip()
+        except ProviderError:
+            raise
         except Exception as e:
-            raise ProviderError(str(e))
+            msg = str(e)
+            retry_after = _extract_retry_after_from_text(msg)
+            if retry_after is None and _is_rate_limit_error(msg):
+                retry_after = 60
+            raise ProviderError(msg, retry_after=retry_after)
+
+    def stream(self, prompt):
+        try:
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Accept": "text/event-stream",
+                },
+                json={
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
+                },
+                stream=True,
+                timeout=180,
+            )
+            if resp.status_code == 429:
+                raise ProviderError("429 rate limited", retry_after=_extract_retry_after(resp))
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                line = line.decode("utf-8")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    data = json.loads(payload)
+                    delta = data["choices"][0].get("delta", {}).get("content")
+                    if delta:
+                        yield delta
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+        except ProviderError:
+            raise
+        except Exception as e:
+            msg = str(e)
+            retry_after = _extract_retry_after_from_text(msg)
+            if retry_after is None and _is_rate_limit_error(msg):
+                retry_after = 60
+            raise ProviderError(msg, retry_after=retry_after)
 
 
+# ------------------------------------------------------------------
+# Mistral
+# ------------------------------------------------------------------
 class MistralProvider(LLMProvider):
-    """Mistral's API is OpenAI-compatible in shape, so this reuses the same
-    request/response format but talks to Mistral's own endpoint and key."""
-
     def __init__(self, model_name="mistral-small-latest", display_name=None):
         api_key = os.getenv("MISTRAL_API_KEY")
         if not api_key:
@@ -144,12 +308,67 @@ class MistralProvider(LLMProvider):
                 json={"model": self.model_name, "messages": [{"role": "user", "content": prompt}]},
                 timeout=120,
             )
+            if resp.status_code == 429:
+                raise ProviderError("429 rate limited", retry_after=_extract_retry_after(resp))
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"].strip()
+        except ProviderError:
+            raise
         except Exception as e:
-            raise ProviderError(str(e))
+            msg = str(e)
+            retry_after = _extract_retry_after_from_text(msg)
+            if retry_after is None and _is_rate_limit_error(msg):
+                retry_after = 60
+            raise ProviderError(msg, retry_after=retry_after)
+
+    def stream(self, prompt):
+        try:
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Accept": "text/event-stream",
+                },
+                json={
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
+                },
+                stream=True,
+                timeout=180,
+            )
+            if resp.status_code == 429:
+                raise ProviderError("429 rate limited", retry_after=_extract_retry_after(resp))
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                line = line.decode("utf-8")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload.strip() == "[DONE]":
+                    break
+                try:
+                    data = json.loads(payload)
+                    delta = data["choices"][0].get("delta", {}).get("content")
+                    if delta:
+                        yield delta
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+        except ProviderError:
+            raise
+        except Exception as e:
+            msg = str(e)
+            retry_after = _extract_retry_after_from_text(msg)
+            if retry_after is None and _is_rate_limit_error(msg):
+                retry_after = 60
+            raise ProviderError(msg, retry_after=retry_after)
 
 
+# ------------------------------------------------------------------
+# Factory
+# ------------------------------------------------------------------
 def _instantiate(spec):
     """spec looks like 'ollama:llama3.2:1b' or 'gemini:gemini-2.5-flash'."""
     kind, _, rest = spec.partition(":")
@@ -165,28 +384,22 @@ def _instantiate(spec):
 
 
 def build_contestants():
-    """
-    Reads CONTESTANTS from the environment - a comma separated list of
-    provider:model specs. Any contestant that fails to initialise (missing
-    key, etc.) is silently skipped so the app degrades gracefully instead
-    of crashing the whole comparison.
-    """
     raw = os.getenv("CONTESTANTS", "ollama:llama3.2:1b,ollama:qwen2.5:3b,ollama:phi3:mini")
     contestants = []
     for spec in [s.strip() for s in raw.split(",") if s.strip()]:
         try:
             contestants.append(_instantiate(spec))
-        except ProviderError:
+        except ProviderError as e:
+            print(f"[build_contestants] SKIPPED '{spec}': {e}")
             continue
+        except Exception as e:
+            print(f"[build_contestants] ERROR '{spec}': {type(e).__name__}: {e}")
+            continue
+    print(f"[build_contestants] Loaded {len(contestants)}: {[c.id for c in contestants]}")
     return contestants
 
 
 def build_judge():
-    """
-    The judge should ideally be independent of / stronger than the
-    contestants so it isn't grading its own homework. Falls back to the
-    first available contestant if no judge is configured.
-    """
     spec = os.getenv("JUDGE_MODEL", "gemini:gemini-2.5-flash")
     try:
         return _instantiate(spec)
