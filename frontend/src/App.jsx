@@ -205,13 +205,20 @@ function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand-block">
-          <span className="brand-pill">LLM Arena</span>
+          <span className="brand-pill">DEBATE AI</span>
           <h1>Compare AI answers, side by side</h1>
-          <p>Ask one question. Watch several models answer live, then see which one wins.</p>
+          <p>
+            Ask one question. Watch several models answer live, then see which
+            one wins.
+          </p>
         </div>
         <div className="top-actions">
-          <button className="ghost-btn" onClick={newComparison}>New</button>
-          <button className="ghost-btn" onClick={() => setShowHistory(true)}>History</button>
+          <button className="ghost-btn" onClick={newComparison}>
+            New
+          </button>
+          <button className="ghost-btn" onClick={() => setShowHistory(true)}>
+            History
+          </button>
         </div>
       </header>
 
@@ -255,7 +262,9 @@ function App() {
       {!hasActive && !asking && !connectionError && (
         <div className="empty-state">
           <h2>No comparison yet</h2>
-          <p>Pick a mode above, ask a question below, and watch the models race.</p>
+          <p>
+            Pick a mode above, ask a question below, and watch the models race.
+          </p>
         </div>
       )}
 
