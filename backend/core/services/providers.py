@@ -395,6 +395,13 @@ def _instantiate(spec):
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         )
 
+    if kind == "groq":
+        return OpenAICompatProvider(
+            model_name=rest,
+            api_key_env="GROQ_API_KEY",
+            base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+        )
+
     raise ProviderError(f"Unknown provider kind: {kind}")
 
 def build_contestants():
