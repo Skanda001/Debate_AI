@@ -7,8 +7,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-secret-key-change-me")
-DEBUG = os.getenv("DEBUG", "True") == "True"
-ALLOWED_HOSTS = ["*"]
+DEBUG = os.environ.get('RENDER', 'FALSE') == 'FALSE' # Set to False when running on Render
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost', os.environ.get('RENDER_EXTERNAL_HOSTNAME', '')]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -20,6 +20,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "core",
+    
 ]
 
 MIDDLEWARE = [
@@ -30,9 +31,13 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
-
+STATIC_URL = '/static/'
+STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 ROOT_URLCONF = "backend.urls"
 
 TEMPLATES = [
