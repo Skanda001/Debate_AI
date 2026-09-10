@@ -370,8 +370,8 @@ class MistralProvider(LLMProvider):
 # Factory
 # ------------------------------------------------------------------
 def _instantiate(spec):
-    """spec looks like 'ollama:llama3.2:1b' or 'gemini:gemini-2.5-flash'."""
     kind, _, rest = spec.partition(":")
+
     if kind == "ollama":
         return OllamaProvider(model_name=rest)
     if kind == "gemini":
@@ -380,8 +380,22 @@ def _instantiate(spec):
         return OpenAICompatProvider(model_name=rest)
     if kind == "mistral":
         return MistralProvider(model_name=rest or "mistral-small-latest")
-    raise ProviderError(f"Unknown provider kind: {kind}")
 
+    if kind == "cerebras":
+        return OpenAICompatProvider(
+            model_name=rest,
+            api_key_env="CEREBRAS_API_KEY",
+            base_url=os.getenv("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+        )
+
+    if kind == "openrouter":
+        return OpenAICompatProvider(
+            model_name=rest,
+            api_key_env="OPENROUTER_API_KEY",
+            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        )
+
+    raise ProviderError(f"Unknown provider kind: {kind}")
 
 def build_contestants():
     raw = os.getenv("CONTESTANTS", "ollama:llama3.2:1b,ollama:qwen2.5:3b,ollama:phi3:mini")
