@@ -15,14 +15,14 @@ class ModelResponseSerializer(serializers.ModelSerializer):
         model = ModelResponse
         fields = [
             "id", "model_id", "display_name", "response", "error",
-            "latency_ms", "is_winner", "score", "verdict", "created_at",
+            "latency_ms", "is_winner", "score", "verdict", "why_not_winner", "created_at",
         ]
 
 
 class JudgmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Judgment
-        fields = ["id", "winner_model_id", "reason", "consensus", "created_at"]
+        fields = ["id", "winner_model_id", "reason", "why_others_lost", "consensus", "created_at"]
 
 
 class QuestionSerializer(serializers.ModelSerializer):

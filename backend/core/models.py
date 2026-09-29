@@ -28,6 +28,7 @@ class ModelResponse(models.Model):
     is_winner = models.BooleanField(default=False)
     score = models.FloatField(null=True, blank=True)
     verdict = models.TextField(blank=True)
+    why_not_winner = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -40,6 +41,7 @@ class Judgment(models.Model):
     question = models.OneToOneField(Question, on_delete=models.CASCADE, related_name="judgment")
     winner_model_id = models.CharField(max_length=120, blank=True, null=True)
     reason = models.TextField(blank=True)
+    why_others_lost = models.TextField(blank=True)
     consensus = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

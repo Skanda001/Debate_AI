@@ -48,12 +48,22 @@ function App() {
         latency_ms: r.latency_ms,
         score: r.score,
         verdict: r.verdict,
+        why_not_winner: r.why_not_winner,
         is_winner: r.is_winner,
       };
     });
     setResponses(respMap);
     setJudge(data.judgment);
-    setEvaluations(data.judgment?.evaluations || []);
+    const evals = (data.judgment?.evaluations && data.judgment.evaluations.length > 0)
+      ? data.judgment.evaluations
+      : (data.responses || []).map((r) => ({
+          model: r.model_id,
+          display_name: r.display_name,
+          score: r.score,
+          verdict: r.verdict,
+          why_not_winner: r.why_not_winner,
+        }));
+    setEvaluations(evals);
     setJudging(false);
     setAsking(false);
   };

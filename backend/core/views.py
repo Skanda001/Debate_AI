@@ -162,6 +162,7 @@ def _save_judgment(question, results, verdict):
         question=question,
         winner_model_id=verdict.get("winner"),
         reason=verdict.get("reason", ""),
+        why_others_lost=verdict.get("why_others_lost", ""),
         consensus=verdict.get("consensus", ""),
     )
     scores = {e.get("model"): e for e in verdict.get("evaluations", [])}
@@ -170,6 +171,7 @@ def _save_judgment(question, results, verdict):
         if ev:
             mr.score = ev.get("score")
             mr.verdict = ev.get("verdict", "")
+            mr.why_not_winner = ev.get("why_not_winner", "")
         mr.is_winner = mr.model_id == verdict.get("winner")
         mr.save()
 

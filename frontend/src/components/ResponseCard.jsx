@@ -40,6 +40,7 @@ function ResponseCard({ modelId, data }) {
     latency_ms,
     score,
     verdict,
+    why_not_winner,
     is_winner,
   } = data;
 
@@ -89,6 +90,11 @@ function ResponseCard({ modelId, data }) {
         {typeof score === "number" && <span className="chip">Score {score}</span>}
         {latency_ms != null && done && (
           <span className="chip">{(latency_ms / 1000).toFixed(1)}s</span>
+        )}
+        {!is_winner && why_not_winner && (
+          <span className="critique-pill" title={`Why not winner: ${why_not_winner}`}>
+            🔍 {why_not_winner}
+          </span>
         )}
       </div>
     </article>
