@@ -29,9 +29,17 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework.authtoken",
     "corsheaders",
     "core",
 ]
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.TokenAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+}
 
 # ---------------------------------------------------------------------------
 # Middleware  (SecurityMiddleware appears ONCE, at the top, as Django expects)
@@ -97,9 +105,14 @@ STATICFILES_STORAGE = "whitenoise.storage.CompressedStaticFilesStorage"
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 ]
 if _frontend := os.environ.get("FRONTEND_ORIGIN"):
     CORS_ALLOWED_ORIGINS.append(_frontend)
+
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
 
 # ---------------------------------------------------------------------------
 # i18n

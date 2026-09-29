@@ -1,7 +1,10 @@
 from django.db import models
+from django.contrib.auth.models import User
 
 
 class Question(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="questions", null=True, blank=True)
+    parent = models.ForeignKey("self", on_delete=models.SET_NULL, related_name="followups", null=True, blank=True)
     text = models.TextField()
     is_pinned = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

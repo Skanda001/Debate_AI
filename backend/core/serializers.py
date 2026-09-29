@@ -1,5 +1,13 @@
+from django.contrib.auth.models import User
 from rest_framework import serializers
 from .models import Question, ModelResponse, Judgment
+
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "username", "email", "date_joined"]
+
 
 
 class ModelResponseSerializer(serializers.ModelSerializer):
@@ -20,7 +28,8 @@ class JudgmentSerializer(serializers.ModelSerializer):
 class QuestionSerializer(serializers.ModelSerializer):
     responses = ModelResponseSerializer(many=True, read_only=True)
     judgment = JudgmentSerializer(read_only=True)
+    parent_id = serializers.IntegerField(source="parent.id", read_only=True)
 
     class Meta:
         model = Question
-        fields = ["id", "text", "is_pinned", "created_at", "responses", "judgment"]
+        fields = ["id", "parent_id", "text", "is_pinned", "created_at", "responses", "judgment"]

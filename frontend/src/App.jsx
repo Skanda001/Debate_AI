@@ -3,6 +3,7 @@ import "./App.css";
 import ResponseCard from "./components/ResponseCard";
 import JudgePanel from "./components/JudgePanel";
 import HistoryDrawer from "./components/HistoryDrawer";
+import AuthModal from "./components/AuthModal";
 import { MODES, buildPrompt } from "./modes";
 import {
   streamAsk,
@@ -11,9 +12,14 @@ import {
   deleteQuestion,
   clearHistory,
   togglePin,
+  apiGetMe,
+  apiLogout,
 } from "./api";
 
 function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [activeQuestionId, setActiveQuestionId] = useState(null);
   const [question, setQuestion] = useState("");
   const [mode, setMode] = useState("direct");
   const [asking, setAsking] = useState(false);
@@ -28,16 +34,58 @@ function App() {
   const esRef = useRef(null);
   const taRef = useRef(null);
 
+  const displayComparison = (data) => {
+    if (data?.id) setActiveQuestionId(data.id);
+    setCurrentQuestion(data.text);
+    const respMap = {};
+    (data.responses || []).forEach((r) => {
+      respMap[r.model_id] = {
+        display_name: r.display_name,
+        text: r.response,
+        done: true,
+        error: r.error,
+        retry_after: r.retry_after,
+        latency_ms: r.latency_ms,
+        score: r.score,
+        verdict: r.verdict,
+        is_winner: r.is_winner,
+      };
+    });
+    setResponses(respMap);
+    setJudge(data.judgment);
+    setEvaluations(data.judgment?.evaluations || []);
+    setJudging(false);
+    setAsking(false);
+  };
+
   const loadHistory = async () => {
     try {
-      setHistory(await fetchHistory());
+      const data = await fetchHistory();
+      const list = Array.isArray(data) ? data : [];
+      setHistory(list);
+      return list;
     } catch (e) {
       console.error(e);
+      setHistory([]);
+      return [];
     }
   };
 
   useEffect(() => {
-    loadHistory();
+    const init = async () => {
+      const me = await apiGetMe();
+      if (me) {
+        setCurrentUser(me);
+      }
+      const items = await loadHistory();
+      const savedId = localStorage.getItem("debate_ai_active_id");
+      if (savedId && savedId !== "none") {
+        await openFromHistory(savedId, false);
+      } else if (!savedId && items && items.length > 0) {
+        await openFromHistory(items[0].id, false);
+      }
+    };
+    init();
     return () => esRef.current?.close();
   }, []);
 
@@ -59,6 +107,7 @@ function App() {
     setAsking(true);
     setQuestion("");
 
+    const parentId = activeQuestionId;
     const es = streamAsk(finalPrompt, {
       start: (data) => {
         if (data.models && Array.isArray(data.models)) {
@@ -111,25 +160,8 @@ function App() {
       judge_started: () => setJudging(true),
       complete: (data) => {
         const result = data.result;
-        const respMap = {};
-        result.responses.forEach((r) => {
-          respMap[r.model_id] = {
-            display_name: r.display_name,
-            text: r.response,
-            done: true,
-            error: r.error,
-            retry_after: r.retry_after,
-            latency_ms: r.latency_ms,
-            score: r.score,
-            verdict: r.verdict,
-            is_winner: r.is_winner,
-          };
-        });
-        setResponses(respMap);
-        setJudge(result.judgment);
-        setEvaluations(result.judgment?.evaluations || []);
-        setJudging(false);
-        setAsking(false);
+        displayComparison(result);
+        localStorage.setItem("debate_ai_active_id", result.id);
         loadHistory();
         esRef.current?.close();
       },
@@ -139,7 +171,7 @@ function App() {
         setJudging(false);
         esRef.current?.close();
       },
-    });
+    }, parentId);
     esRef.current = es;
   };
 
@@ -150,41 +182,38 @@ function App() {
     }
   };
 
-  const openFromHistory = async (id) => {
-    const data = await fetchDetail(id);
-    setCurrentQuestion(data.text);
-    const respMap = {};
-    data.responses.forEach((r) => {
-      respMap[r.model_id] = {
-        display_name: r.display_name,
-        text: r.response,
-        done: true,
-        error: r.error,
-        retry_after: r.retry_after,
-        latency_ms: r.latency_ms,
-        score: r.score,
-        verdict: r.verdict,
-        is_winner: r.is_winner,
-      };
-    });
-    setResponses(respMap);
-    setJudge(data.judgment);
-    setEvaluations(data.judgment?.evaluations || []);
-    setJudging(false);
-    setAsking(false);
-    setShowHistory(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  const openFromHistory = async (id, scrollToTop = true) => {
+    try {
+      const data = await fetchDetail(id);
+      if (data && data.text) {
+        displayComparison(data);
+        localStorage.setItem("debate_ai_active_id", id);
+        setShowHistory(false);
+        if (scrollToTop) {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load comparison", e);
+    }
   };
 
   const handleDelete = async (id, e) => {
     e.stopPropagation();
     await deleteQuestion(id);
+    const savedId = localStorage.getItem("debate_ai_active_id");
+    if (String(savedId) === String(id)) {
+      newComparison();
+    }
     loadHistory();
   };
+
   const handleClear = async () => {
     await clearHistory();
+    newComparison();
     loadHistory();
   };
+
   const handlePin = async (id, e) => {
     e.stopPropagation();
     await togglePin(id);
@@ -194,8 +223,50 @@ function App() {
   const newComparison = () => {
     setQuestion("");
     setCurrentQuestion("");
+    setActiveQuestionId(null);
     reset();
+    localStorage.setItem("debate_ai_active_id", "none");
     taRef.current?.focus();
+  };
+
+  const stopGenerating = () => {
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
+    setAsking(false);
+    setJudging(false);
+    setResponses((prev) => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach((id) => {
+        if (!updated[id].done) {
+          updated[id] = {
+            ...updated[id],
+            done: true,
+            text: (updated[id].text || "") + (updated[id].text ? " … [stopped]" : "[Stopped by user]"),
+          };
+        }
+      });
+      return updated;
+    });
+    taRef.current?.focus();
+  };
+
+  const handleAuthSuccess = async (user) => {
+    setCurrentUser(user);
+    const items = await loadHistory();
+    if (items && items.length > 0) {
+      await openFromHistory(items[0].id, false);
+    } else {
+      newComparison();
+    }
+  };
+
+  const handleLogout = async () => {
+    await apiLogout();
+    setCurrentUser(null);
+    newComparison();
+    await loadHistory();
   };
 
   const modelIds = Object.keys(responses);
@@ -219,6 +290,22 @@ function App() {
           <button className="ghost-btn" onClick={() => setShowHistory(true)}>
             History
           </button>
+
+          {currentUser ? (
+            <div className="user-badge-wrap" title={`Logged in as ${currentUser.username}`}>
+              <span className="user-avatar-circle">
+                {currentUser.username.charAt(0).toUpperCase()}
+              </span>
+              <span className="user-name-text">{currentUser.username}</span>
+              <button className="user-logout-btn" onClick={handleLogout} title="Log Out">
+                Log Out
+              </button>
+            </div>
+          ) : (
+            <button className="ghost-btn auth-ghost-btn" onClick={() => setShowAuthModal(true)}>
+              <span>👤</span> Sign In
+            </button>
+          )}
         </div>
       </header>
 
@@ -239,7 +326,19 @@ function App() {
 
       {currentQuestion && (
         <div className="active-question">
-          <span>Question</span>
+          <div className="active-question-header">
+            <span>Question</span>
+            {(asking || judging) && (
+              <button
+                type="button"
+                className="stop-mini-btn"
+                onClick={stopGenerating}
+                title="Stop generation"
+              >
+                <span className="stop-square">■</span> Stop
+              </button>
+            )}
+          </div>
           <h2>{currentQuestion}</h2>
         </div>
       )}
@@ -285,15 +384,42 @@ function App() {
                 {MODES.find((m) => m.id === mode)?.icon}{" "}
                 {MODES.find((m) => m.id === mode)?.label}
               </button>
+              {activeQuestionId && currentQuestion && (
+                <span className="thread-pill" title={`Follow-up with history context: "${currentQuestion}"`}>
+                  <span>🔗 Thread Active</span>
+                  <button
+                    type="button"
+                    className="thread-detach-btn"
+                    onClick={() => setActiveQuestionId(null)}
+                    title="Detach and ask without conversation history"
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
             </div>
-            <button
-              className="send-btn"
-              onClick={ask}
-              disabled={asking || !question.trim()}
-              title="Send"
-            >
-              {asking ? "…" : "➤"}
-            </button>
+            <div className="prompt-actions-right">
+              {asking || judging ? (
+                <button
+                  type="button"
+                  className="stop-btn"
+                  onClick={stopGenerating}
+                  title="Stop generating"
+                >
+                  <span className="stop-square">■</span> Stop
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="send-btn"
+                  onClick={ask}
+                  disabled={!question.trim()}
+                  title="Send"
+                >
+                  ➤
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -301,6 +427,8 @@ function App() {
       {showHistory && (
         <HistoryDrawer
           history={history}
+          currentUser={currentUser}
+          onOpenAuth={() => setShowAuthModal(true)}
           onClose={() => setShowHistory(false)}
           onOpen={openFromHistory}
           onDelete={handleDelete}
@@ -308,6 +436,12 @@ function App() {
           onPin={handlePin}
         />
       )}
+
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onSuccess={handleAuthSuccess}
+      />
     </div>
   );
 }
